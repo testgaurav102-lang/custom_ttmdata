@@ -1,0 +1,43 @@
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Virtual environments
+.venv
+venv
+ENV
+env
+
+# IDEs
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project specific
+
+.env.example
+.git
+.gitignore
+README.md
+mermaid.md
+
+# Development
+uploads/*
+!uploads/.gitkeep
