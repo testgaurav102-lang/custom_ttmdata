@@ -41,13 +41,18 @@ class Message(BaseModel):
     contents: list[ContentItem]
 
 
+class FileRef(BaseModel):
+    fileId: str
+    fileName: Optional[str] = None
+
+
 class ChatCompletionRequest(BaseModel):
     chatId: str
     messageId: str
     model: str = "llama3.1"
     mode: str = "quick_search"
     messages: list[Message]
-    files: list[dict] = []
+    files: list[FileRef] = []
 
 
 class CompletionContentItem(BaseModel):

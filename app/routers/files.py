@@ -21,6 +21,7 @@ from app.constants import DEFAULT_FILE_LABEL, MIME_TO_EXT, SUPPORTED_EXTENSIONS
 from app.models.file import (
     FileErrorResponse,
     FileUploadResponse,
+    SheetInfo,
 )
 from app.services.aws_service import BUCKET, s3_client
 from app.services.data_loader import data_loader
@@ -99,8 +100,18 @@ async def upload_file(
         s3_client.upload_file(str(original_file_path), BUCKET, s3_key)
         logger.info("Uploaded file to S3: %s", s3_key)
 
+        sheets: list[SheetInfo] = []
         try:
-            data_loader.load_file(str(original_file_path), name)
+            loaded_tables = data_loader.load_file(str(original_file_path), name, file_id)
+            sheets = [
+                SheetInfo(
+                    sheetName=t["sheet_name"],
+                    tableName=t["table_name"],
+                    rowCount=t["row_count"],
+                    columns=t["columns"],
+                )
+                for t in loaded_tables
+            ]
         except Exception as exc:
             logger.warning("File uploaded to S3 but DuckDB load failed: %s", exc)
 
@@ -109,6 +120,7 @@ async def upload_file(
             fileName=name,
             sizeInBytes=len(content),
             label=DEFAULT_FILE_LABEL,
+            sheets=sheets,
         )
 
     except Exception as exc:
@@ -226,6 +238,8 @@ async def delete_files(fileIds: str):
                 len(delete_response.get("Deleted", [])),
                 file_id,
             )
+
+            data_loader.drop_file_tables(file_id)
 
         return {"message": "File deleted successfully."}
 

@@ -52,16 +52,28 @@ from app.utils.prompt_loader import prompt_loader
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# User-message templates
-# System prompts live in prompts/ files; these short templates are code-adjacent.
+# Schema context builder
 # ---------------------------------------------------------------------------
 
-_SCHEMA_CONTEXT_TEMPLATE = (
-    "Schema: tablename :{table_name},\n"
-    "columns: {columns},\n"
-    "column_datatype: {dtypes}.\n"
-    "User Question: {query}"
-)
+
+def _build_schema_context_message(tables: list[dict], query: str) -> str:
+    """Render a multi-table schema description for the Stage 1 planner prompt.
+
+    Each entry in *tables* is a metadata dict produced by DataLoader with keys:
+    table_name, sheet_name, file_name, columns, dtypes, row_count.
+    """
+    lines: list[str] = ["You have access to the following tables in DuckDB:\n"]
+    for idx, t in enumerate(tables, start=1):
+        lines.append(
+            f"Table {idx}: {t['table_name']}"
+            f" (Sheet: \"{t['sheet_name']}\", File: \"{t['file_name']}\")"
+        )
+        lines.append(f"  Columns : {', '.join(t['columns'])}")
+        dtype_str = ", ".join(f"{c}→{d}" for c, d in t["dtypes"].items())
+        lines.append(f"  Types   : {dtype_str}")
+        lines.append(f"  Rows    : {t['row_count']}\n")
+    lines.append(f"User Question: {query}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -147,10 +159,11 @@ class LLMService:
         self,
         messages: list[dict],
         completion_id: str | None = None,
+        file_ids: list[str] | None = None,
     ) -> dict:
         """Two-stage non-streaming analysis pipeline."""
         query, needs_visualization, _needs_pdf = self._parse_user_request(messages)
-        data_context = self._build_data_context()
+        data_context = self._build_data_context(file_ids)
 
         if not data_context.get("has_data"):
             final_response = NO_DATA_MESSAGE
@@ -175,12 +188,7 @@ class LLMService:
 
     def _run_simple_pipeline(self, query: str, data_context: dict, needs_visualization: bool = False) -> str:
         """Execute the two-LLM-call non-streaming analysis and return text."""
-        schema_user_msg = _SCHEMA_CONTEXT_TEMPLATE.format(
-            table_name=data_context["table_name"],
-            columns=data_context["columns"],
-            dtypes=data_context["dtypes"],
-            query=query,
-        )
+        schema_user_msg = _build_schema_context_message(data_context["tables"], query)
 
         stage1_messages = [
             {"role": "system", "content": self._prompts["simple_analyst_planner"]},
@@ -207,9 +215,13 @@ class LLMService:
                 logger.warning("SQL execution error: %s", exc)
                 query_results = [{"error": str(exc)}]
 
+        # Stage 1 may independently decide a chart is needed.
+        stage1_wants_chart = bool(stage1_response.get("generate_chart"))
+        effective_visualization = needs_visualization or stage1_wants_chart
+
         stage2_user_msg = (
             f"user_query :{query},\n"
-            f"generate_visualization: {str(needs_visualization).lower()},\n"
+            f"generate_visualization: {str(effective_visualization).lower()},\n"
             f"query_results: {query_results},\n"
             f"chart_config: \n"
             f"generate_chart: {stage1_response.get('generate_chart')},\n"
@@ -247,10 +259,11 @@ class LLMService:
         self,
         messages: list[dict],
         completion_id: str,
+        file_ids: list[str] | None = None,
     ) -> AsyncGenerator[str, None]:
         """Two-stage streaming analysis pipeline that emits SSE events."""
         query, needs_visualization, needs_pdf = self._parse_user_request(messages)
-        data_context = self._build_data_context()
+        data_context = self._build_data_context(file_ids)
 
         try:
             yield _sse({"event": "start", "completionId": completion_id})
@@ -261,7 +274,7 @@ class LLMService:
                 return
 
             async for chunk in self._run_streaming_pipeline(
-                query, data_context, completion_id, needs_visualization, needs_pdf
+                query, data_context, completion_id, needs_visualization, needs_pdf,
             ):
                 yield chunk
 
@@ -283,12 +296,7 @@ class LLMService:
         Mermaid charts are included only when *needs_visualization* is True.
         A PDF is generated and uploaded to S3 only when *needs_pdf* is True.
         """
-        schema_user_msg = _SCHEMA_CONTEXT_TEMPLATE.format(
-            table_name=data_context["table_name"],
-            columns=data_context["columns"],
-            dtypes=data_context["dtypes"],
-            query=query,
-        )
+        schema_user_msg = _build_schema_context_message(data_context["tables"], query)
 
         stage1_messages = [
             {"role": "system", "content": self._prompts["analysis_planner"]},
@@ -312,8 +320,13 @@ class LLMService:
         # --- Execute SQL queries from the plan ---
         try:
             final_output = self._execute_analysis_plan(query, data_context, stage1_response)
-            # Signal to the BI report writer whether it should generate Mermaid charts.
-            final_output["generate_visualization"] = needs_visualization
+            # Enable visualization if the user's message triggered keywords OR if
+            # Stage 1 determined that any query result warrants a chart.
+            stage1_wants_chart = any(
+                item.get("generate_chart")
+                for item in stage1_response.get("analysis_plan", [])
+            )
+            final_output["generate_visualization"] = needs_visualization or stage1_wants_chart
         except Exception as exc:
             logger.error("Analysis plan execution failed: %s", exc)
             yield _sse({"event": "delta", "contentType": "textChunk", "content": f"Error calling LLM: {exc}"})
@@ -398,11 +411,18 @@ class LLMService:
         stage1_response: dict,
     ) -> dict:
         """Execute each SQL query in the analysis plan and collect results."""
+        available_tables = [
+            {
+                "table_name": t["table_name"],
+                "sheet_name": t["sheet_name"],
+                "columns": t["columns"],
+            }
+            for t in data_context.get("tables", [])
+        ]
         final_output: dict = {
             "user_question": query,
             "dataset_context": {
-                "table_name": data_context["table_name"],
-                "available_columns": data_context["columns"],
+                "available_tables": available_tables,
             },
             "analysis_results": [],
         }
@@ -475,16 +495,29 @@ class LLMService:
         )
         return query, needs_visualization, needs_pdf
 
-    def _build_data_context(self) -> dict:
-        """Return schema metadata for the currently loaded dataset."""
-        if not data_loader.metadata:
+    def _build_data_context(self, file_ids: list[str] | None = None) -> dict:
+        """Return schema metadata for all tables associated with *file_ids*.
+
+        Falls back to all registered tables when *file_ids* is empty / None.
+        Returns ``{"has_data": False}`` when no tables are found.
+        """
+        if file_ids:
+            tables = data_loader.get_tables_for_files(file_ids)
+        else:
+            # Fall back to all loaded files so non-file-aware callers still work.
+            all_ids = data_loader.list_file_ids()
+            tables = data_loader.get_tables_for_files(all_ids)
+
+        if not tables:
             return {"has_data": False}
 
         return {
             "has_data": True,
-            "table_name": data_loader.metadata["table_name"],
-            "columns": data_loader.metadata["columns"],
-            "dtypes": data_loader.metadata["dtypes"],
+            "tables": tables,
+            # Backward-compat keys pointing at the first table.
+            "table_name": tables[0]["table_name"],
+            "columns": tables[0]["columns"],
+            "dtypes": tables[0]["dtypes"],
         }
 
     def _build_openai_messages(

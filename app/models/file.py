@@ -17,11 +17,19 @@ class FileContent(BaseModel):
     label: Optional[str] = None
 
 
+class SheetInfo(BaseModel):
+    sheetName: str
+    tableName: str
+    rowCount: int
+    columns: list[str]
+
+
 class FileUploadResponse(BaseModel):
     fileId: str
     fileName: str
     sizeInBytes: int
     label: str
+    sheets: list[SheetInfo] = []
 
 
 class FileUrlResponse(BaseModel):

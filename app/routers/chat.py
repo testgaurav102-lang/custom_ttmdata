@@ -42,10 +42,13 @@ async def chat_completions(request: ChatCompletionRequest):
     llm_service.register_completion(completion_id)
     logger.debug("Starting completion %s for chat %s.", completion_id, request.chatId)
 
+    file_ids = [f.fileId for f in request.files]
+
     async def stream_response():
         async for chunk in llm_service.generate_streaming(
             messages=request.model_dump().get("messages", []),
             completion_id=completion_id,
+            file_ids=file_ids,
         ):
             yield chunk
 
