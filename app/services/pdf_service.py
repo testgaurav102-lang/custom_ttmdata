@@ -268,6 +268,14 @@ def _build_pdf_elements(content: str, doc: SimpleDocTemplate) -> list:
         flags=re.DOTALL | re.IGNORECASE,
     )
 
+    # Strip vega-lite blocks — raw JSON should not appear as text in the PDF
+    content = re.sub(
+        r"```vega-lite\s*.*?```",
+        "",
+        content,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+
     # Cover page
     elements.append(Spacer(1, doc.height / 2 - 40))
     elements.append(Paragraph(report_title, cover_style))
@@ -279,8 +287,10 @@ def _build_pdf_elements(content: str, doc: SimpleDocTemplate) -> list:
     for idx, part in enumerate(parts):
         if idx % 2 == 0:
             _append_text_block(part, elements, is_first_section_ref)
-        else:
-            _append_mermaid_block(part, elements, doc)
+        # else:
+        #     Mermaid chart rendering is temporarily disabled.
+        #     Uncomment the line below to re-enable chart images in the PDF.
+        #     _append_mermaid_block(part, elements, doc)
 
     return elements
 
@@ -307,7 +317,11 @@ def _append_text_block(text: str, elements: list, is_first_section_ref: list) ->
             continue
         elif line.startswith("## "):
             if not is_first_section_ref[0]:
-                elements.append(PageBreak())
+                # 3 blank lines between sections instead of a page break
+                elements.append(Spacer(1, 14))
+                elements.append(Spacer(1, 14))
+                elements.append(Spacer(1, 14))
+                # elements.append(PageBreak())  # page break disabled
             is_first_section_ref[0] = False
             elements.append(Paragraph(line[3:], heading2_style))
             elements.append(Spacer(1, 10))
