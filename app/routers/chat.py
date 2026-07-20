@@ -52,7 +52,11 @@ async def chat_completions(request: ChatCompletionRequest):
         ):
             yield chunk
 
-    return StreamingResponse(stream_response(), media_type="text/event-stream")
+    return StreamingResponse(stream_response(), media_type="text/event-stream",headers={
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    },)
 
 
 @router.post("/chat/completions/{completion_id}/stop", response_model=StopResponse)

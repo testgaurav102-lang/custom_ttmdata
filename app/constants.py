@@ -37,6 +37,12 @@ PDF_PROGRESS_MESSAGES: list[str] = [
 
 PDF_ACTIVITY_START_MESSAGE: str = "Generating analysis report..."
 
+# Activity messages streamed at each stage of the LLM analysis pipeline
+ACTIVITY_ANALYZING: str = "\n Analyzing your question..."
+ACTIVITY_PLANNING: str = "\n Planning data queries..."
+ACTIVITY_QUERYING: str = "\n Querying the data..."
+ACTIVITY_GENERATING: str = "\n Generating insights..."
+
 # ---------------------------------------------------------------------------
 # LLM / analysis pipeline
 # ---------------------------------------------------------------------------
@@ -45,6 +51,11 @@ PDF_ACTIVITY_START_MESSAGE: str = "Generating analysis report..."
 NO_DATA_MESSAGE: str = (
     "I cannot find sufficient information in the uploaded document "
     "to answer this question."
+)
+
+# Generic message shown to the user when any internal error occurs
+GENERIC_ERROR_MESSAGE: str = (
+    "Something went wrong while processing your request. Please try again."
 )
 
 # Keywords that signal the user wants a chart/visualisation

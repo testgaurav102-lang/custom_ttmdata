@@ -39,7 +39,12 @@ from openai import OpenAI
 
 from app.config import settings
 from app.constants import (
+    ACTIVITY_ANALYZING,
+    ACTIVITY_GENERATING,
+    ACTIVITY_PLANNING,
+    ACTIVITY_QUERYING,
     CHART_KEYWORDS,
+    GENERIC_ERROR_MESSAGE,
     NO_DATA_MESSAGE,
     PDF_ACTIVITY_START_MESSAGE,
     PDF_KEYWORDS,
@@ -204,7 +209,7 @@ class LLMService:
             stage1_response = json.loads(completion.choices[0].message.content or "{}")
         except Exception as exc:
             logger.error("Stage 1 (simple) LLM call failed: %s", exc)
-            return f"Error calling LLM: {exc}"
+            return GENERIC_ERROR_MESSAGE
 
         sql_query = stage1_response.get("sql")
         query_results = None
@@ -213,7 +218,8 @@ class LLMService:
                 query_results = data_loader.execute_query(sql_query)
             except Exception as exc:
                 logger.warning("SQL execution error: %s", exc)
-                query_results = [{"error": str(exc)}]
+                # Keep error detail in server logs only — send empty results to Stage 2
+                query_results = []
 
         # Stage 1 may independently decide a chart is needed.
         stage1_wants_chart = bool(stage1_response.get("generate_chart"))
@@ -249,7 +255,7 @@ class LLMService:
             )
         except Exception as exc:
             logger.error("Stage 2 (simple) LLM call failed: %s", exc)
-            return f"Error calling LLM: {exc}"
+            return GENERIC_ERROR_MESSAGE
 
     # ------------------------------------------------------------------
     # Streaming pipeline
@@ -280,7 +286,7 @@ class LLMService:
 
         except Exception as exc:
             logger.exception("Unexpected error in generate_streaming: %s", exc)
-            yield _sse({"event": "delta", "contentType": "textChunk", "content": f"Unexpected error: {exc}"})
+            yield _sse({"event": "delta", "contentType": "textChunk", "content": GENERIC_ERROR_MESSAGE})
             yield _sse({"event": "end", "reason": "error", "inputTokens": 0, "outputTokens": 0})
 
     async def _run_streaming_pipeline(
@@ -304,6 +310,7 @@ class LLMService:
         ]
 
         # --- Stage 1: get analysis plan ---
+        yield _activity(ACTIVITY_ANALYZING)
         try:
             client = _get_openai_client()
             completion = client.chat.completions.create(
@@ -313,11 +320,18 @@ class LLMService:
             stage1_response = json.loads(completion.choices[0].message.content or "{}")
         except Exception as exc:
             logger.error("Stage 1 (streaming) LLM call failed: %s", exc)
-            yield _sse({"event": "delta", "contentType": "textChunk", "content": f"Error calling LLM: {exc}"})
+            yield _sse({"event": "delta", "contentType": "textChunk", "content": GENERIC_ERROR_MESSAGE})
             yield _sse({"event": "end", "reason": "error", "inputTokens": 0, "outputTokens": 0})
             return
 
         # --- Execute SQL queries from the plan ---
+        query_count = len(stage1_response.get("analysis_plan", []))
+        planning_msg = (
+            f"{ACTIVITY_PLANNING} ({query_count} quer{'y' if query_count == 1 else 'ies'})"
+            if query_count else ACTIVITY_PLANNING
+        )
+        yield _activity(planning_msg)
+        yield _activity(ACTIVITY_QUERYING)
         try:
             final_output = self._execute_analysis_plan(query, data_context, stage1_response)
             # Enable visualization if the user's message triggered keywords OR if
@@ -329,11 +343,12 @@ class LLMService:
             final_output["generate_visualization"] = needs_visualization or stage1_wants_chart
         except Exception as exc:
             logger.error("Analysis plan execution failed: %s", exc)
-            yield _sse({"event": "delta", "contentType": "textChunk", "content": f"Error calling LLM: {exc}"})
+            yield _sse({"event": "delta", "contentType": "textChunk", "content": GENERIC_ERROR_MESSAGE})
             yield _sse({"event": "end", "reason": "error", "inputTokens": 0, "outputTokens": 0})
             return
 
         # --- Stage 2: stream BI report ---
+        yield _activity(ACTIVITY_GENERATING)
         stage2_messages = [
             {"role": "system", "content": self._prompts["bi_report_writer"]},
             {"role": "user", "content": json.dumps(final_output, indent=2)},
@@ -365,7 +380,7 @@ class LLMService:
 
         except Exception as exc:
             logger.error("Stage 2 (streaming) LLM call failed: %s", exc)
-            yield _sse({"event": "delta", "contentType": "textChunk", "content": f"Error calling LLM: {exc}"})
+            yield _sse({"event": "delta", "contentType": "textChunk", "content": GENERIC_ERROR_MESSAGE})
             yield _sse({"event": "end", "reason": "error", "inputTokens": 0, "outputTokens": 0})
             return
 
@@ -373,11 +388,7 @@ class LLMService:
         file_info = None
         if needs_pdf and accumulated_content:
             logger.info("PDF generation requested — building report for completion %s.", completion_id)
-            yield _sse({
-                "event": "activityDelta",
-                "contentType": "activityChunk",
-                "content": PDF_ACTIVITY_START_MESSAGE,
-            })
+            yield _activity(PDF_ACTIVITY_START_MESSAGE)
             try:
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(create_pdf_report, accumulated_content)
@@ -386,7 +397,7 @@ class LLMService:
                         if self.is_stopped(completion_id):
                             return
                         msg = PDF_PROGRESS_MESSAGES[min(idx, len(PDF_PROGRESS_MESSAGES) - 1)]
-                        yield _sse({"event": "activityDelta", "contentType": "activityChunk", "content": msg})
+                        yield _activity(msg)
                         idx += 1
                         time.sleep(1)
                     file_info = future.result()
@@ -452,7 +463,9 @@ class LLMService:
                     "y_axis": item.get("y_axis"),
                 },
                 "sql": sql_query,
-                "query_result": query_result if not error else [{"error": error}],
+                # On SQL error, send empty results — the error detail stays in
+                # server logs only and is never exposed to the user.
+                "query_result": query_result if not error else [],
             })
 
         return final_output
@@ -573,6 +586,12 @@ class LLMService:
 def _sse(payload: dict) -> str:
     """Format a dict as a Server-Sent Events ``data:`` line."""
     return f"data: {json.dumps(payload)}\n\n"
+
+
+def _activity(message: str) -> str:
+    """Shorthand for an ``activityDelta`` SSE event shown in the frontend thinking indicator."""
+    print('in Activity')
+    return _sse({"event": "activityDelta", "contentType": "activityChunk", "content": message})
 
 
 # Module-level singleton
